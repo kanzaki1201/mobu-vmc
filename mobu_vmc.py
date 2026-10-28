@@ -94,7 +94,7 @@ def _read(skel_state):
     out = {}
     for bone, node, _ in BONES:
         m = fb.FBMatrix()
-        skel_state.GetNodeMatrix(getattr(fb, "kFBSkeleton%sIndex" % node), m)
+        skel_state.GetNodeMatrix(getattr(fb.FBSkeletonNodeId, "kFBSkeleton%sIndex" % node), m)
         q = fb.FBVector4d()
         fb.FBMatrixToQuaternion(q, m)
         out[bone] = ((q[0], q[1], q[2], q[3]), (m[12], m[13], m[14]))
