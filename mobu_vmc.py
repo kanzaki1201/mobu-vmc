@@ -138,3 +138,106 @@ def stop():
         _state["sock"].close()
         _state["sock"] = None
     _state["actors"] = []
+
+
+# --- Panel ---
+
+try:
+    import pyfbsdk as fb
+    import pyfbsdk_additions as fba
+except ImportError:  # plain CPython has no pyfbsdk
+    fb = None
+
+TOOL_NAME = "VMC Sender"
+
+if fb:
+    def _label(text):
+        label = fb.FBLabel()
+        label.Caption = text
+        return label
+
+    class VmcSenderTool(fb.FBTool):
+        def __init__(self):
+            fb.FBTool.__init__(self, TOOL_NAME)
+            fba.FBAddTool(self)
+            self.rows = []  # (actor name, send checkbox, port edit)
+
+            x = fb.FBAddRegionParam(0, fb.FBAttachType.kFBAttachLeft, "")
+            y = fb.FBAddRegionParam(0, fb.FBAttachType.kFBAttachTop, "")
+            w = fb.FBAddRegionParam(0, fb.FBAttachType.kFBAttachRight, "")
+            h = fb.FBAddRegionParam(0, fb.FBAttachType.kFBAttachBottom, "")
+            self.AddRegion("main", "main", x, y, w, h)
+            vbox = fba.FBVBoxLayout()
+            self.SetControl("main", vbox)
+
+            host_row = fba.FBHBoxLayout()
+            host_row.Add(_label("Host"), 40)
+            self.host = fb.FBEdit()
+            self.host.Text = "127.0.0.1"
+            host_row.AddRelative(self.host)
+            vbox.Add(host_row, 25)
+
+            self.rows_box = fba.FBVBoxLayout()
+            vbox.AddRelative(self.rows_box)
+
+            button_row = fba.FBHBoxLayout()
+            refresh = fb.FBButton()
+            refresh.Caption = "Refresh"
+            refresh.OnClick.Add(self._refresh)
+            self.toggle = fb.FBButton()
+            self.toggle.OnClick.Add(self._toggle)
+            button_row.Add(refresh, 80)
+            button_row.AddRelative(None)
+            button_row.Add(self.toggle, 80)
+            vbox.Add(button_row, 25)
+
+            self.status = _label("")
+            vbox.Add(self.status, 25)
+            self._sync()
+
+            self.StartSizeX = 300
+            self.StartSizeY = 220
+            self.OnShow.Add(self._on_show)
+
+        def _on_show(self, control, event):
+            if event.Shown:
+                if not self.rows:
+                    self._refresh()
+                self._sync()
+
+        def _refresh(self, control=None, event=None):
+            self.rows_box.RemoveAll()
+            self.rows = []
+            for i, actor in enumerate(fb.FBSystem().Scene.Actors):
+                send = fb.FBButton()
+                send.Style = fb.FBButtonStyle.kFBCheckbox
+                send.Caption = actor.Name
+                send.State = True
+                port = fb.FBEditNumber()
+                port.Precision = 0
+                port.Min = 1
+                port.Max = 65535
+                port.Value = 39540 + i
+                row = fba.FBHBoxLayout()
+                row.AddRelative(send)
+                row.Add(_label("port"), 35)
+                row.Add(port, 60)
+                self.rows_box.Add(row, 25)
+                self.rows.append((actor.Name, send, port))
+
+        def _toggle(self, control, event):
+            if _state["callback"]:
+                stop()
+            else:
+                # resolve once: sendto would look a host name up every frame
+                host = socket.gethostbyname(self.host.Text.strip())
+                start([(name, host, round(port.Value)) for name, send, port in self.rows if send.State])
+            self._sync()
+
+        def _sync(self):
+            on = bool(_state["callback"])
+            self.toggle.Caption = "Stop" if on else "Start"
+            self.status.Caption = "Streaming %d Actor(s)" % len(_state["actors"]) if on else "Stopped"
+
+    if TOOL_NAME not in fba.FBToolList:
+        VmcSenderTool()

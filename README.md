@@ -5,7 +5,15 @@ Each Actor sends one VMC frame per MotionBuilder frame: Root, 21 body bones (no 
 
 MotionBuilder 2026 only (Python 3.11).
 
-## Usage
+## Install
+
+Copy `mobu_vmc.py` to `%USERPROFILE%\Documents\MB\2026\config\PythonStartup`.
+Restart MotionBuilder and open Python Tools > VMC Sender.
+
+Set the receiver host, tick the Actors to send, set their ports (39540 and up), and press Start.
+Avoid port 39539, the Rokoko Studio default.
+
+## Console
 
 In the MotionBuilder Python Editor:
 
@@ -17,7 +25,6 @@ mobu_vmc.stop()
 ```
 
 Each entry is `(actor name, host, port)`. Use one port per Actor.
-Avoid port 39539, the Rokoko Studio default.
 
 ## Receiver notes
 
