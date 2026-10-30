@@ -1,4 +1,4 @@
-"""Stream MotionBuilder Actors to a VMC receiver. MotionBuilder 2026 only."""
+"""Stream MotionBuilder Actors and Characters to a VMC receiver. MotionBuilder 2026 only."""
 import socket
 import struct
 import time
@@ -86,39 +86,87 @@ def frame_messages(now, stance, t):
 
 # --- MotionBuilder glue ---
 
-_state = {"sock": None, "actors": [], "callback": None, "t0": 0.0}
+_state = {"sock": None, "sources": [], "callback": None, "t0": 0.0}
 
 
-def _read(skel_state):
+def _pose(m):
     import pyfbsdk as fb
+    q = fb.FBVector4d()
+    fb.FBMatrixToQuaternion(q, m)
+    return (q[0], q[1], q[2], q[3]), (m[12], m[13], m[14])
+
+
+def _read(get_matrix):
     out = {}
-    for bone, node, _ in BONES:
+    for bone, node, parent in BONES:
+        m = get_matrix(node)
+        out[bone] = _pose(m) if m else out[parent]
+    return out
+
+
+def _actor_reader(skel_state):
+    import pyfbsdk as fb
+
+    def get(node):
         m = fb.FBMatrix()
         skel_state.GetNodeMatrix(getattr(fb.FBSkeletonNodeId, "kFBSkeleton%sIndex" % node), m)
-        q = fb.FBVector4d()
-        fb.FBMatrixToQuaternion(q, m)
-        out[bone] = ((q[0], q[1], q[2], q[3]), (m[12], m[13], m[14]))
-    return out
+        return m
+    return get
+
+
+def _character_now(character):
+    import pyfbsdk as fb
+
+    def get(node):
+        model = character.GetModel(getattr(fb.FBBodyNodeId, "kFB%sNodeId" % node))
+        if not model:
+            return None
+        m = fb.FBMatrix()
+        model.GetMatrix(m)
+        return m
+    return get
+
+
+def _character_stance(character):
+    import pyfbsdk as fb
+
+    def get(node):
+        node_id = getattr(fb.FBBodyNodeId, "kFB%sNodeId" % node)
+        if not character.GetModel(node_id):
+            return None
+        m = fb.FBMatrix()
+        character.GetTransformOffset(node_id, m)
+        return m
+    return get
 
 
 def start(targets):
     import pyfbsdk as fb
     stop()
-    found = {a.Name: a for a in fb.FBSystem().Scene.Actors}
-    actors = []
-    for name, host, port in targets:
-        if name not in found:
-            print("mobu_vmc: Actor '%s' not found, skipped" % name)
+    scene = fb.FBSystem().Scene
+    found = {("Actor", a.Name): a for a in scene.Actors}
+    found.update({("Character", c.Name): c for c in scene.Characters})
+    sources = []
+    for kind, name, host, port in targets:
+        source = found.get((kind, name))
+        if not source:
+            print("mobu_vmc: %s '%s' not found, skipped" % (kind, name))
             continue
-        actors.append((found[name], (host, port), _read(found[name].GetDefaultSkeletonState())))
+        if kind == "Actor":
+            now = lambda a=source: _read(_actor_reader(a.GetCurrentSkeletonState()))
+            stance = _read(_actor_reader(source.GetDefaultSkeletonState()))
+        else:
+            now = lambda c=source: _read(_character_now(c))
+            stance = _read(_character_stance(source))
+        sources.append((now, (host, port), stance))
     _state["sock"] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    _state["actors"] = actors
+    _state["sources"] = sources
     _state["t0"] = time.time()
 
     def on_sync(control, event):
         t = time.time() - _state["t0"]
-        for actor, addr, stance in _state["actors"]:
-            now = _read(actor.GetCurrentSkeletonState())
+        for read_now, addr, stance in _state["sources"]:
+            now = read_now()
             try:
                 _state["sock"].sendto(osc_bundle(frame_messages(now, stance, t)), addr)
             except OSError:
@@ -126,7 +174,7 @@ def start(targets):
 
     _state["callback"] = on_sync
     fb.FBEvaluateManager().OnSynchronizationEvent.Add(on_sync)
-    print("mobu_vmc: streaming %d Actor(s)" % len(actors))
+    print("mobu_vmc: streaming %d source(s)" % len(sources))
 
 
 def stop():
@@ -137,7 +185,7 @@ def stop():
     if _state["sock"]:
         _state["sock"].close()
         _state["sock"] = None
-    _state["actors"] = []
+    _state["sources"] = []
 
 
 # --- Panel ---
@@ -160,7 +208,7 @@ if fb:
         def __init__(self):
             fb.FBTool.__init__(self, TOOL_NAME)
             fba.FBAddTool(self)
-            self.rows = []  # (actor name, send checkbox, port edit)
+            self.rows = []
 
             x = fb.FBAddRegionParam(0, fb.FBAttachType.kFBAttachLeft, "")
             y = fb.FBAddRegionParam(0, fb.FBAttachType.kFBAttachTop, "")
@@ -208,10 +256,12 @@ if fb:
         def _refresh(self, control=None, event=None):
             self.rows_box.RemoveAll()
             self.rows = []
-            for i, actor in enumerate(fb.FBSystem().Scene.Actors):
+            scene = fb.FBSystem().Scene
+            sources = [("Actor", a.Name) for a in scene.Actors] + [("Character", c.Name) for c in scene.Characters]
+            for i, (kind, name) in enumerate(sources):
                 send = fb.FBButton()
                 send.Style = fb.FBButtonStyle.kFBCheckbox
-                send.Caption = actor.Name
+                send.Caption = "%s  (%s)" % (name, kind)
                 send.State = True
                 port = fb.FBEditNumber()
                 port.Precision = 0
@@ -223,7 +273,7 @@ if fb:
                 row.Add(_label("port"), 35)
                 row.Add(port, 60)
                 self.rows_box.Add(row, 25)
-                self.rows.append((actor.Name, send, port))
+                self.rows.append((kind, name, send, port))
 
         def _toggle(self, control, event):
             if _state["callback"]:
@@ -231,13 +281,13 @@ if fb:
             else:
                 # resolve once: sendto would look a host name up every frame
                 host = socket.gethostbyname(self.host.Text.strip())
-                start([(name, host, round(port.Value)) for name, send, port in self.rows if send.State])
+                start([(kind, name, host, round(port.Value)) for kind, name, send, port in self.rows if send.State])
             self._sync()
 
         def _sync(self):
             on = bool(_state["callback"])
             self.toggle.Caption = "Stop" if on else "Start"
-            self.status.Caption = "Streaming %d Actor(s)" % len(_state["actors"]) if on else "Stopped"
+            self.status.Caption = "Streaming %d source(s)" % len(_state["sources"]) if on else "Stopped"
 
     if TOOL_NAME not in fba.FBToolList:
         VmcSenderTool()
